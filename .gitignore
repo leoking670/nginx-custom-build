@@ -1,0 +1,15 @@
+# Build artifacts / local temp
+/stage/
+/src/
+*.tar.gz
+*.sig
+SHA256SUMS
+SHA256SUMS.sig
+
+# Local history
+nohup.out
+*.log
+
+# Not part of the public repo
+/legacy/
+CLAUDE.md
