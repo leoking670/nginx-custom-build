@@ -51,9 +51,9 @@ Host (cron, runs deploy.sh)
 2. Generate a signing GPG keypair:
    ```bash
    gpg --generate-key
-   gpg --export-secret-keys > key.asc
-   base64 key.asc | gh secret set NGINX_GPG_PRIVATE
-   gpg --export > nginx-signer.asc   # this is the public key
+   gpg --export-secret-keys --armor > key.asc
+   gh secret set NGINX_GPG_PRIVATE < key.asc
+   gpg --export > nginx-signer.asc
    ```
 3. Trigger a build (wait for the schedule, or run the workflow manually). The first run publishes a Release tagged `nginx-<v>-openssl-<v>`.
 
@@ -63,7 +63,11 @@ Host (cron, runs deploy.sh)
    ```bash
    gpg --no-default-keyring --keyring /usr/share/keyrings/nginx-signer.gpg --import nginx-signer.asc
    ```
-2. Copy `deploy.sh` to your host and set `REPO="OWNER/REPO"` at the top.
+2. Install `deploy.sh` to your host (must be executable, see the exec-bit note below) and set `REPO="OWNER/REPO"` at the top:
+   ```bash
+   install -d -m 0755 /usr/local/sbin/nginx-update
+   install -m 0755 deploy.sh /usr/local/sbin/nginx-update/deploy.sh
+   ```
 3. Add a cron entry (host local time):
    ```cron
    0 4 * * * /usr/local/sbin/nginx-update/deploy.sh

@@ -51,9 +51,9 @@ GitHub Actions (schedule + workflow_dispatch)
 2. 產生簽署用的 GPG 金鑰對:
    ```bash
    gpg --generate-key
-   gpg --export-secret-keys > key.asc
-   base64 key.asc | gh secret set NGINX_GPG_PRIVATE
-   gpg --export > nginx-signer.asc   # 這是公鑰
+   gpg --export-secret-keys --armor > key.asc
+   gh secret set NGINX_GPG_PRIVATE < key.asc
+   gpg --export > nginx-signer.asc
    ```
 3. 觸發建置(等待排程,或手動執行 workflow)。首次執行會發佈一個 tag 為 `nginx-<v>-openssl-<v>` 的 Release。
 
@@ -63,7 +63,11 @@ GitHub Actions (schedule + workflow_dispatch)
    ```bash
    gpg --no-default-keyring --keyring /usr/share/keyrings/nginx-signer.gpg --import nginx-signer.asc
    ```
-2. 將 `deploy.sh` 複製到主機,並在頂端設定 `REPO="OWNER/REPO"`。
+2. 將 `deploy.sh` 安裝到主機(必須可執行,見下方執行位說明),並在頂端設定 `REPO="OWNER/REPO"`:
+   ```bash
+   install -d -m 0755 /usr/local/sbin/nginx-update
+   install -m 0755 deploy.sh /usr/local/sbin/nginx-update/deploy.sh
+   ```
 3. 加入 cron(主機本地時間):
    ```cron
    0 4 * * * /usr/local/sbin/nginx-update/deploy.sh

@@ -1,19 +1,6 @@
 #!/bin/bash
-#   from a signed GitHub Release and swaps it in on this host.
-#   It inherits the legacy script's single-instance lock / circuit breaker /
-#   smooth-upgrade-with-rollback, and adds signature verification + an ldd check.
-#
-# ==== one-time setup (root, manual) ====
-#  1. Set REPO below to your GitHub repo "OWNER/REPO" (public releases need no token).
-#  2. Import the public key that matches the private key used in CI:
-#     gpg --export <KEYID> > /etc/nginx-update/nginx-signer.asc
-#     gpg --no-default-keyring --keyring /usr/share/keyrings/nginx-signer.gpg \
-#         --import /etc/nginx-update/nginx-signer.asc
-#  3. Add to cron:  0 4 * * * /path/to/deploy.sh   (host local time)
-#
 set -euo pipefail
 
-# ===== config =====
 readonly REPO="OWNER/REPO"              # edit this: your GitHub repo
 readonly NGINX_PREFIX="/usr/local/nginx"
 readonly NGINX_USER="nginx"
@@ -25,23 +12,19 @@ readonly MAX_BACKUPS=3
 readonly CURL_OPTS="--connect-timeout 10 --max-time 120 --retry 3 -fsSL"
 readonly KEYRING="/usr/share/keyrings/nginx-signer.gpg"
 readonly MARKER="$NGINX_PREFIX/.current_version"
-readonly BUILD_DIR="/tmp/nginx-build"
-readonly RUNTIME_PKGS="zlib1g libpcre2-8-0 libjemalloc2"   # zstd/brotli are static, not needed
+readonly WORK_ROOT="/var/lib/nginx-update"
+readonly RUNTIME_PKGS="zlib1g libpcre2-8-0 libjemalloc2"
+ALLOW_DOWNGRADE=0
+for arg in "$@"; do [[ "$arg" == "--allow-downgrade" ]] && ALLOW_DOWNGRADE=1; done
+readonly ALLOW_DOWNGRADE
 
-# ===== preflight =====
 [[ $EUID -ne 0 ]] && { echo "root required"; exit 1; }
 for cmd in jq gpgv curl tar; do
     command -v "$cmd" >/dev/null 2>&1 || { echo "required command missing: $cmd (apt install jq gpg gnupg2)"; exit 1; }
 done
 
-# ===== single-instance lock =====
 exec 200>/var/lock/nginx-update.lock
 flock -n 200 || { echo "another instance is running"; exit 1; }
-
-# ===== helpers =====
-WORK="$BUILD_DIR/nginx-update"
-rm -rf "$WORK"; mkdir -p "$WORK"
-trap 'rm -rf "$WORK"' EXIT
 
 log() { echo "[$(date '+%F %T')] [$1] ${*:2}" >> "$LOG_FILE" || true; }
 
@@ -62,7 +45,21 @@ mkdir -p "$(dirname "$LOG_FILE")" "$BACKUP_DIR" "$(dirname "$CIRCUIT_BREAKER")" 
 manage_log
 [[ -f "$CIRCUIT_BREAKER" ]] && { log ERROR "circuit breaker already set: $CIRCUIT_BREAKER"; exit 1; }
 
-# ===== user & deps (idempotent) =====
+# Validate the private work tree before executing downloaded files from it.
+install -d -m 0700 -o root -g root "$WORK_ROOT"
+parent="$WORK_ROOT"
+while [[ "$parent" != "/" && "$parent" != "." ]]; do
+    parent=$(dirname "$parent")
+    [[ -d "$parent" ]] || { echo "missing parent dir: $parent" >&2; exit 1; }
+    mode=$(stat -c '%a' "$parent" 2>/dev/null || echo "?")
+    owner=$(stat -c '%U' "$parent" 2>/dev/null || echo "?")
+    if [[ "$owner" != "root" || "${mode:3:1}" == "w" ]]; then
+        echo "unsafe parent dir (owner=$owner mode=$mode): $parent" >&2; exit 1
+    fi
+done
+WORK=$(mktemp -d "$WORK_ROOT/nginx-update.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
 if ! getent group "$NGINX_USER" >/dev/null 2>&1; then
     groupadd -r "$NGINX_USER"
     log INFO "created group: $NGINX_USER"
@@ -72,7 +69,8 @@ if ! getent passwd "$NGINX_USER" >/dev/null 2>&1; then
     log INFO "created user: $NGINX_USER"
 fi
 
-mkdir -p /var/cache/nginx/{client_temp,proxy_temp,fastcgi_temp,uwsgi_temp,scgi_temp} /etc/nginx /run/lock
+install -d -m 0755 /var/log/nginx /etc/nginx /run/lock
+mkdir -p /var/cache/nginx/{client_temp,proxy_temp,fastcgi_temp,uwsgi_temp,scgi_temp}
 chown -R "$NGINX_USER:$NGINX_USER" /var/cache/nginx
 
 missing_pkgs=()
@@ -84,7 +82,7 @@ if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
     apt-get update -qq && apt-get install -y -qq "${missing_pkgs[@]}" >> "$LOG_FILE" || { log ERROR "dependency install failed"; exit 1; }
 fi
 
-# ===== current version (fall back to parsing nginx -V when the marker is absent) =====
+# Resolve the installed version when the marker predates this script.
 current_tag=""
 if [[ -f "$MARKER" ]]; then
     current_tag=$(cat "$MARKER")
@@ -95,7 +93,6 @@ elif [[ -x "$NGINX_PREFIX/sbin/nginx" ]]; then
     [[ -n "$n_ver" ]] && current_tag="nginx-$n_ver-openssl-${s_ver:-unknown}"
 fi
 
-# ===== fetch latest release =====
 fetch_latest() {
     local data tag
     data=$(curl $CURL_OPTS "https://api.github.com/repos/$REPO/releases/latest") || { log ERROR "failed to fetch release"; exit 1; }
@@ -116,7 +113,22 @@ fi
 latest_nginx=$(echo "$latest_tag" | sed -n 's/^nginx-\([0-9.]*\)-openssl.*/\1/p')
 latest_ssl=$(echo "$latest_tag" | sed -n 's/.*-openssl-\([0-9.]*\)$/\1/p')
 
-# ===== download + verify =====
+if [[ -n "$current_tag" ]]; then
+    cur_nginx=$(echo "$current_tag" | sed -n 's/^nginx-\([0-9.]*\)-openssl.*/\1/p')
+    cur_ssl=$(echo "$current_tag" | sed -n 's/.*-openssl-\([0-9.]*\)$/\1/p')
+    downgrade_nginx=0; downgrade_ssl=0
+    [[ -n "$cur_nginx" && -n "$latest_nginx" ]] && printf '%s\n%s\n' "$latest_nginx" "$cur_nginx" | sort -V -C && downgrade_nginx=1 || true
+    [[ -n "$cur_ssl" && -n "$latest_ssl" ]] && printf '%s\n%s\n' "$latest_ssl" "$cur_ssl" | sort -V -C && downgrade_ssl=1 || true
+    if [[ $downgrade_nginx -eq 1 || $downgrade_ssl -eq 1 ]]; then
+        if [[ $ALLOW_DOWNGRADE -eq 1 ]]; then
+            log WARN "downgrade detected (nginx $cur_nginx->$latest_nginx ssl $cur_ssl->$latest_ssl) but --allow-downgrade given; proceeding"
+        else
+            log ERROR "downgrade refused (nginx $cur_nginx->$latest_nginx ssl $cur_ssl->$latest_ssl); use --allow-downgrade to force"
+            exit 1
+        fi
+    fi
+fi
+
 cd "$WORK"
 asset_url="https://github.com/$REPO/releases/download/$latest_tag/nginx-$latest_nginx-openssl-$latest_ssl.tar.gz"
 log INFO "downloading: $asset_url"
@@ -126,38 +138,38 @@ curl $CURL_OPTS -o nginx.tar.gz.sig "$asset_url.sig" || { log ERROR "failed to d
 [[ -f "$KEYRING" ]] || { log ERROR "verification keyring missing: $KEYRING"; fatal "GPG keyring not configured"; }
 
 verify() {
-    # gpgv verifies the tarball signature (hard gate)
     if ! gpgv --keyring "$KEYRING" nginx.tar.gz.sig nginx.tar.gz; then
         fatal "gpgv signature verification failed"
     fi
     tar -tzf nginx.tar.gz >/dev/null || fatal "corrupt tarball"
     tar -xzf nginx.tar.gz -C .
     [[ -x ./sbin/nginx ]] || fatal "no nginx binary inside tarball"
+    [[ -f ./conf/mime.types ]] || fatal "no conf/mime.types inside tarball"
 }
 
 verify
 
-# runtime dependency check (ldd must not report anything not found)
 if ldd ./sbin/nginx | grep -qi 'not found'; then
     ldd ./sbin/nginx
     fatal "missing runtime dependencies (ldd)"
 fi
 
-# ===== branch: fresh install / smooth upgrade =====
 if [[ ! -x "$NGINX_PREFIX/sbin/nginx" ]]; then
-    # ---- fresh host ----
     log INFO "fresh install nginx $latest_nginx (openssl $latest_ssl)"
-    mkdir -p "$NGINX_PREFIX/sbin"
-    cp -a ./sbin/nginx "$NGINX_PREFIX/sbin/nginx"
-    chmod 755 "$NGINX_PREFIX/sbin/nginx"
+    install -d -m 0755 "$NGINX_PREFIX/sbin"
+    tmp="$NGINX_PREFIX/sbin/nginx.new"
+    install -m 0755 ./sbin/nginx "$tmp"
+    mv -f "$tmp" "$NGINX_PREFIX/sbin/nginx"
     ln -sf "$NGINX_PREFIX/sbin/nginx" /usr/local/bin/nginx || true
 
-    # only write a minimal placeholder config when none exists (never overwrite)
+    if [[ ! -f /etc/nginx/mime.types ]]; then
+        log INFO "writing mime.types from release"
+        install -m 0644 ./conf/mime.types /etc/nginx/mime.types
+    fi
+
     if [[ ! -f /etc/nginx/nginx.conf ]]; then
         log INFO "writing placeholder nginx.conf"
         cat > /etc/nginx/nginx.conf << 'EOF'
-# Minimal placeholder config (generated by the nginx auto-update script).
-# Edit this to add your real server / SSL configuration.
 user nginx;
 worker_processes auto;
 error_log /var/log/nginx/error.log warn;
@@ -217,33 +229,31 @@ EOF
     echo "$latest_tag" > "$MARKER"
     log INFO "fresh install complete: $latest_tag"
 else
-    # ---- existing install: smooth upgrade ----
     log INFO "upgrading nginx to $latest_tag"
     nginx_was_running=0
     systemctl is-active --quiet nginx >/dev/null 2>&1 && nginx_was_running=1
 
-    rollback_backup=""
     backup="$BACKUP_DIR/nginx-$(date +%Y%m%d-%H%M%S)"
     cp -a "$NGINX_PREFIX/sbin/nginx" "$backup"
-    [[ $nginx_was_running -eq 1 ]] && { rollback_backup="$WORK/nginx-rollback.bin"; cp -a "$backup" "$rollback_backup"; } || true
-    log INFO "backup: $(basename "$backup")${rollback_backup:+ (incl. rollback copy)}"
+    rollback_backup="$WORK/nginx-rollback.bin"
+    cp -a "$backup" "$rollback_backup"
+    log INFO "backup: $(basename "$backup") (rollback copy ready)"
 
-    # prune old backups
     count=$(ls -1 "$BACKUP_DIR"/nginx-* 2>/dev/null | wc -l || echo 0)
     [[ $count -gt $MAX_BACKUPS ]] && ls -1t "$BACKUP_DIR"/nginx-* 2>/dev/null | tail -n $((count - MAX_BACKUPS)) | xargs -r rm -f || true
 
-    # install the new binary
-    cp -a ./sbin/nginx "$NGINX_PREFIX/sbin/nginx"
-    chmod 755 "$NGINX_PREFIX/sbin/nginx"
+    standby="$NGINX_PREFIX/sbin/nginx.new"
+    install -m 0755 ./sbin/nginx "$standby"
 
-    # run -t with the new binary to validate config compatibility; roll back + trip breaker on failure
-    if ! "$NGINX_PREFIX/sbin/nginx" -t >/dev/null 2>&1; then
-        log ERROR "new binary nginx -t failed, rolling back"
-        [[ -f "$rollback_backup" ]] && cp -a "$rollback_backup" "$NGINX_PREFIX/sbin/nginx" || true
-        fatal "new binary nginx -t failed"
+    if ! "$standby" -t >/dev/null 2>&1; then
+        log ERROR "staged binary nginx -t failed, aborting without touching live nginx"
+        rm -f "$standby"
+        fatal "staged binary config check failed"
     fi
 
     if [[ $nginx_was_running -eq 1 ]]; then
+        # USR2 re-executes the binary at its installed path.
+        mv -f "$standby" "$NGINX_PREFIX/sbin/nginx"
         smooth_upgrade=0
         if [[ -f /run/nginx.pid ]]; then
             old_pid=$(cat /run/nginx.pid)
@@ -259,20 +269,23 @@ else
                 fi
             } || true
         fi
-        [[ $smooth_upgrade -eq 0 ]] && {
-            log WARN "smooth upgrade failed, trying restart"
-            systemctl restart nginx 2>/dev/null || {
-                log ERROR "restart failed, rolling back"
-                [[ -f "$rollback_backup" ]] && cp -a "$rollback_backup" "$NGINX_PREFIX/sbin/nginx" && log INFO "old binary restored" || true
-                systemctl start nginx 2>/dev/null || fatal "cannot start after rollback"
-                fatal "upgrade failed, rolled back and recovered"
-            }
-            log INFO "restart upgrade successful"
-            smooth_upgrade=1
-        }
+        if [[ $smooth_upgrade -eq 0 ]]; then
+            log WARN "smooth upgrade did not confirm; restoring pre-upgrade binary"
+            cp -a "$rollback_backup" "$NGINX_PREFIX/sbin/nginx"
+            rm -f /run/nginx.pid.oldbin 2>/dev/null || true
+            systemctl restart nginx 2>/dev/null || true
+            sleep 2
+            if ! systemctl is-active --quiet nginx; then
+                log ERROR "pre-upgrade master could not be restarted"
+                fatal "Cannot restore service after failed upgrade"
+            fi
+            log INFO "pre-upgrade master restored via restart"
+            fatal "upgrade failed; restored pre-upgrade master (see log)"
+        fi
         sleep 2; systemctl is-active --quiet nginx || fatal "service unhealthy after upgrade"
     else
-        log INFO "nginx not running, installing binary without starting"
+        log INFO "nginx not running, swapping binary without starting"
+        mv -f "$standby" "$NGINX_PREFIX/sbin/nginx"
     fi
     echo "$latest_tag" > "$MARKER"
     log INFO "upgrade complete: $latest_tag"

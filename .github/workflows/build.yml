@@ -2,12 +2,15 @@ name: Build and Release nginx
 
 on:
   schedule:
-    - cron: "7 3 * * *"   # daily; offset from the top of the hour
+    - cron: "7 3 * * *"
   workflow_dispatch: {}
 
 concurrency:
   group: nginx-build
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   check:
@@ -21,12 +24,20 @@ jobs:
       - name: Detect latest versions
         id: up
         run: |
-          OUT=$(./scripts/check-update.sh || true)
-          echo "$OUT"
-          set -- $(echo "$OUT" | grep -E '^LATEST_' | tr '=' ' ')
-          NGINX=$(echo "$OUT" | sed -n 's/^LATEST_NGINX=//p')
-          SSL=$(echo "$OUT" | sed -n 's/^LATEST_SSL=//p')
-          if [ -n "$NGINX" ] && [ -n "$SSL" ]; then
+          set +e
+          OUT=$(./scripts/check-update.sh)
+          rc=$?
+          set -e
+          # 0 builds, 1 skips, and 2 fails the check.
+          if [ "$rc" -eq 2 ]; then
+            echo "$OUT" >&2
+            echo "detection failed (rc=2)" >&2
+            exit 2
+          fi
+          echo "$OUT" >&2
+          if [ "$rc" -eq 0 ]; then
+            NGINX=$(echo "$OUT" | sed -n 's/^LATEST_NGINX=//p')
+            SSL=$(echo "$OUT" | sed -n 's/^LATEST_SSL=//p')
             echo "need=yes" >> "$GITHUB_OUTPUT"
             echo "nginx=$NGINX" >> "$GITHUB_OUTPUT"
             echo "openssl=$SSL" >> "$GITHUB_OUTPUT"
@@ -40,6 +51,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: debian:13
+    outputs:
+      nginx: ${{ needs.check.outputs.nginx }}
+      openssl: ${{ needs.check.outputs.openssl }}
     env:
       NGINX_VER: ${{ needs.check.outputs.nginx }}
       SSL_VER: ${{ needs.check.outputs.openssl }}
@@ -54,6 +68,15 @@ jobs:
             zlib1g-dev libpcre2-dev libjemalloc-dev
           rm -rf /var/lib/apt/lists/*
 
+      - name: Build static zstd (linked into nginx, no runtime libzstd)
+        run: |
+          WORK="$GITHUB_WORKSPACE/src"
+          mkdir -p "$WORK" && cd "$WORK"
+          git clone --depth 1 https://github.com/facebook/zstd.git zstd
+          cd zstd
+          make -j"$(nproc)" lib-release
+          make PREFIX=/usr/local install-lib install-includes
+
       - name: Download sources
         run: |
           WORK="$GITHUB_WORKSPACE/src"
@@ -65,10 +88,22 @@ jobs:
           git clone --depth 1 --recursive https://github.com/google/ngx_brotli.git
           git clone --depth 1 https://github.com/tokers/zstd-nginx-module.git
 
-      - name: Configure and build
+      - name: Build static brotli lib
         run: |
-          cd "$GITHUB_WORKSPACE/src/nginx-${NGINX_VER}"
+          WORK="$GITHUB_WORKSPACE/src"
+          cd "$WORK/ngx_brotli/deps/brotli"
+          mkdir -p out && cd out
+          cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_C_FLAGS="-Ofast -flto -funroll-loops" \
+            -DCMAKE_CXX_FLAGS="-Ofast -flto -funroll-loops" ..
+          cmake --build . --config Release --target brotlienc
+
+      - name: Configure and build nginx
+        run: |
+          WORK="$GITHUB_WORKSPACE/src"
+          cd "$WORK/nginx-${NGINX_VER}"
           cores=$(nproc)
+          # Link zstd statically and jemalloc dynamically; option order is significant.
           ./configure \
             --prefix=/usr/local/nginx \
             --user=nginx --group=nginx \
@@ -87,7 +122,7 @@ jobs:
             --with-http_realip_module --with-http_gzip_static_module \
             --with-http_stub_status_module \
             --with-pcre-jit \
-            --with-ld-opt=-ljemalloc \
+            --with-ld-opt="-L/usr/local/lib -Wl,-Bstatic -lzstd -Wl,-Bdynamic -ljemalloc" \
             --with-openssl="../openssl-${SSL_VER}" \
             --with-openssl-opt="no-shared enable-tls1_3" \
             --add-module=../ngx_brotli \
@@ -97,12 +132,14 @@ jobs:
 
       - name: Package
         run: |
+          WORK="$GITHUB_WORKSPACE/src"
           STAGE="$GITHUB_WORKSPACE/stage"
-          mkdir -p "$STAGE/sbin"
-          cp "$GITHUB_WORKSPACE/src/nginx-${NGINX_VER}/objs/nginx" "$STAGE/sbin/nginx"
+          mkdir -p "$STAGE/sbin" "$STAGE/conf"
+          cp "$WORK/nginx-${NGINX_VER}/objs/nginx" "$STAGE/sbin/nginx"
+          cp "$WORK/nginx-${NGINX_VER}/conf/mime.types" "$STAGE/conf/mime.types"
           echo "nginx-${NGINX_VER}-openssl-${SSL_VER}" > "$STAGE/.versions"
           tar -czf "$GITHUB_WORKSPACE/nginx-${NGINX_VER}-openssl-${SSL_VER}.tar.gz" \
-            -C "$STAGE" sbin .versions
+            -C "$STAGE" sbin conf .versions
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -113,8 +150,11 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
-      TAG: "nginx-${{ needs.build.outputs.nginx }}-openssl-${{ needs.build.outputs.openssl }}"
+      NGINX_VER: ${{ needs.build.outputs.nginx }}
+      SSL_VER: ${{ needs.build.outputs.openssl }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -137,12 +177,17 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: "nginx-$NGINX_VER-openssl-$SSL_VER"
         run: |
           TARBALL=$(ls -1 nginx-*.tar.gz | head -1)
-          gh release create "$TAG" \
-            --title "nginx-${{ needs.build.outputs.nginx }} (openssl ${{ needs.build.outputs.openssl }})" \
-            --notes "Auto-built. nginx ${{ needs.build.outputs.nginx }} / OpenSSL ${{ needs.build.outputs.openssl }}" \
-            "$TARBALL" "$TARBALL.sig" SHA256SUMS SHA256SUMS.sig
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; adopting it (no recreate)" >&2
+          else
+            gh release create "$TAG" \
+              --title "nginx-$NGINX_VER (openssl $SSL_VER)" \
+              --notes "Auto-built. nginx $NGINX_VER / OpenSSL $SSL_VER" \
+              "$TARBALL" "$TARBALL.sig" SHA256SUMS SHA256SUMS.sig
+          fi
 
       - name: Bump published version
         if: success()
@@ -151,9 +196,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          jq -n --arg n "${{ needs.build.outputs.nginx }}" --arg s "${{ needs.build.outputs.openssl }}" \
+          jq -n --arg n "$NGINX_VER" --arg s "$SSL_VER" \
             '{_comment:"The last successfully published version. The check script compares upstream latest against this before building; it is advanced only after a release succeeds. The host does not read this file.",nginx:$n,openssl:$s}' \
             > versions.json
           git add versions.json
-          git commit -m "release: nginx ${{ needs.build.outputs.nginx }} / openssl ${{ needs.build.outputs.openssl }}"
+          git commit -m "release: nginx $NGINX_VER / openssl $SSL_VER"
           git push
