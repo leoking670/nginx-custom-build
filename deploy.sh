@@ -52,8 +52,8 @@ while [[ "$parent" != "/" && "$parent" != "." ]]; do
     parent=$(dirname "$parent")
     [[ -d "$parent" ]] || { echo "missing parent dir: $parent" >&2; exit 1; }
     mode=$(stat -c '%a' "$parent" 2>/dev/null || echo "?")
-    owner=$(stat -c '%U' "$parent" 2>/dev/null || echo "?")
-    if [[ "$owner" != "root" || "${mode:3:1}" == "w" ]]; then
+    owner=$(stat -c '%u' "$parent" 2>/dev/null || echo "?")
+    if [[ ! "$mode" =~ ^[0-7]+$ ]] || (( (0$mode & 0022) != 0 )) || [[ "$owner" != "0" ]]; then
         echo "unsafe parent dir (owner=$owner mode=$mode): $parent" >&2; exit 1
     fi
 done
@@ -272,6 +272,10 @@ else
         if [[ $smooth_upgrade -eq 0 ]]; then
             log WARN "smooth upgrade did not confirm; restoring pre-upgrade binary"
             cp -a "$rollback_backup" "$NGINX_PREFIX/sbin/nginx"
+            for pid in "${new_pid:-}" "$old_pid"; do
+                [[ "$pid" =~ ^[0-9]+$ ]] && kill -QUIT "$pid" 2>/dev/null || true
+            done
+            sleep 1
             rm -f /run/nginx.pid.oldbin 2>/dev/null || true
             systemctl restart nginx 2>/dev/null || true
             sleep 2

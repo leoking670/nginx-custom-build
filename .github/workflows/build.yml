@@ -29,21 +29,24 @@ jobs:
           rc=$?
           set -e
           # 0 builds, 1 skips, and 2 fails the check.
-          if [ "$rc" -eq 2 ]; then
-            echo "$OUT" >&2
-            echo "detection failed (rc=2)" >&2
-            exit 2
-          fi
           echo "$OUT" >&2
-          if [ "$rc" -eq 0 ]; then
-            NGINX=$(echo "$OUT" | sed -n 's/^LATEST_NGINX=//p')
-            SSL=$(echo "$OUT" | sed -n 's/^LATEST_SSL=//p')
-            echo "need=yes" >> "$GITHUB_OUTPUT"
-            echo "nginx=$NGINX" >> "$GITHUB_OUTPUT"
-            echo "openssl=$SSL" >> "$GITHUB_OUTPUT"
-          else
-            echo "need=no" >> "$GITHUB_OUTPUT"
-          fi
+          case "$rc" in
+            0)
+              NGINX=$(echo "$OUT" | sed -n 's/^LATEST_NGINX=//p')
+              SSL=$(echo "$OUT" | sed -n 's/^LATEST_SSL=//p')
+              [[ -n "$NGINX" && -n "$SSL" ]] || { echo "detection returned no versions" >&2; exit 2; }
+              echo "need=yes" >> "$GITHUB_OUTPUT"
+              echo "nginx=$NGINX" >> "$GITHUB_OUTPUT"
+              echo "openssl=$SSL" >> "$GITHUB_OUTPUT"
+              ;;
+            1)
+              echo "need=no" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "detection failed (rc=$rc)" >&2
+              exit "$rc"
+              ;;
+          esac
 
   build:
     needs: check
@@ -181,7 +184,17 @@ jobs:
         run: |
           TARBALL=$(ls -1 nginx-*.tar.gz | head -1)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG already exists; adopting it (no recreate)" >&2
+            assets=$(gh release view "$TAG" --json assets --jq '.assets[].name') || {
+              echo "could not inspect existing release $TAG" >&2
+              exit 1
+            }
+            for asset in "$TARBALL" "$TARBALL.sig" SHA256SUMS SHA256SUMS.sig; do
+              grep -Fqx "$asset" <<< "$assets" || {
+                echo "existing release $TAG is missing asset: $asset" >&2
+                exit 1
+              }
+            done
+            echo "release $TAG already exists with all expected assets; adopting it" >&2
           else
             gh release create "$TAG" \
               --title "nginx-$NGINX_VER (openssl $SSL_VER)" \

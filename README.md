@@ -55,6 +55,7 @@ Host (cron, runs deploy.sh)
    gh secret set NGINX_GPG_PRIVATE < key.asc
    gpg --export > nginx-signer.asc
    ```
+   Use a dedicated CI signing key with no passphrase; do not upload a personal key. The workflow signs non-interactively and does not handle passphrase prompts.
 3. Trigger a build (wait for the schedule, or run the workflow manually). The first run publishes a Release tagged `nginx-<v>-openssl-<v>`.
 
 **One-time, host side (as root):**

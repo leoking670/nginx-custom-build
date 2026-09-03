@@ -55,6 +55,7 @@ GitHub Actions (schedule + workflow_dispatch)
    gh secret set NGINX_GPG_PRIVATE < key.asc
    gpg --export > nginx-signer.asc
    ```
+   請使用專供 CI 簽署、且不設密碼的金鑰,不要上傳個人金鑰。工作流程以非互動方式簽署,不會處理密碼提示。
 3. 觸發建置(等待排程,或手動執行 workflow)。首次執行會發佈一個 tag 為 `nginx-<v>-openssl-<v>` 的 Release。
 
 **一次性,主機端(以 root):**
