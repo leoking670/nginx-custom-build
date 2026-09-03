@@ -9,7 +9,7 @@
 #     gpg --export <KEYID> > /etc/nginx-update/nginx-signer.asc
 #     gpg --no-default-keyring --keyring /usr/share/keyrings/nginx-signer.gpg \
 #         --import /etc/nginx-update/nginx-signer.asc
-#  3. Add to cron:  0 4 * * * /path/to/deploy.sh   (VPS local time)
+#  3. Add to cron:  0 4 * * * /path/to/deploy.sh   (host local time)
 #
 set -euo pipefail
 
@@ -145,7 +145,7 @@ fi
 
 # ===== branch: fresh install / smooth upgrade =====
 if [[ ! -x "$NGINX_PREFIX/sbin/nginx" ]]; then
-    # ---- fresh VPS ----
+    # ---- fresh host ----
     log INFO "fresh install nginx $latest_nginx (openssl $latest_ssl)"
     mkdir -p "$NGINX_PREFIX/sbin"
     cp -a ./sbin/nginx "$NGINX_PREFIX/sbin/nginx"

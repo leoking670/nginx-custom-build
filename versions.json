@@ -1,5 +1,5 @@
 {
-  "_comment": "The last successfully published version. The check script compares upstream latest against this before building; it is advanced only after a release succeeds. The VPS does not read this file; the release tag is the single source of truth for the installed version.",
+  "_comment": "The last successfully published version. The check script compares upstream latest against this before building; it is advanced only after a release succeeds. The host does not read this file; the release tag is the single source of truth for the installed version.",
   "nginx": "1.28.0",
   "openssl": "3.5.2"
 }

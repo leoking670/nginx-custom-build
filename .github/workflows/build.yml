@@ -152,7 +152,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           jq -n --arg n "${{ needs.build.outputs.nginx }}" --arg s "${{ needs.build.outputs.openssl }}" \
-            '{_comment:"The last successfully published version. The check script compares upstream latest against this before building; it is advanced only after a release succeeds. The VPS does not read this file.",nginx:$n,openssl:$s}' \
+            '{_comment:"The last successfully published version. The check script compares upstream latest against this before building; it is advanced only after a release succeeds. The host does not read this file.",nginx:$n,openssl:$s}' \
             > versions.json
           git add versions.json
           git commit -m "release: nginx ${{ needs.build.outputs.nginx }} / openssl ${{ needs.build.outputs.openssl }}"
