@@ -45,26 +45,32 @@ Host (cron, runs deploy.sh)
 
 ## Setup
 
+The included `nginx-signer.asc` is the public signing key for `leoking670/nginx-custom-build`. For your own fork, replace it with your public key and configure the matching private key as `NGINX_GPG_PRIVATE`.
+
 **One-time, GitHub side:**
 
 1. Push this repo as a **public** repository — public releases let the host download without a token.
 2. Generate a signing GPG keypair:
    ```bash
    gpg --generate-key
-   gpg --export-secret-keys --armor > key.asc
-   gh secret set NGINX_GPG_PRIVATE < key.asc
-   gpg --export > nginx-signer.asc
+   gpg --armor --export-secret-keys KEY_FINGERPRINT | gh secret set NGINX_GPG_PRIVATE
+   gpg --armor --output nginx-signer.asc --export KEY_FINGERPRINT
    ```
    Use a dedicated CI signing key with no passphrase; do not upload a personal key. The workflow signs non-interactively and does not handle passphrase prompts.
 3. Trigger a build (wait for the schedule, or run the workflow manually). The first run publishes a Release tagged `nginx-<v>-openssl-<v>`.
 
 **One-time, host side (as root):**
 
-1. Install the public key into a keyring:
+Requires Debian 13 on x86_64 with systemd.
+
+1. Install prerequisites once, then import the public key. Deployment checks dependencies and reports missing packages:
    ```bash
-   gpg --no-default-keyring --keyring /usr/share/keyrings/nginx-signer.gpg --import nginx-signer.asc
+   apt-get update
+   apt-get install -y ca-certificates curl jq gnupg gpgv tar util-linux libc-bin zlib1g libpcre2-8-0 libjemalloc2 cron
+   install -d -m 0755 /usr/share/keyrings
+   gpg --dearmor --output /usr/share/keyrings/nginx-signer.gpg nginx-signer.asc
    ```
-2. Install `deploy.sh` to your host (must be executable, see the exec-bit note below) and set `REPO="OWNER/REPO"` at the top:
+2. Install `deploy.sh`, then edit `REPO="OWNER/REPO"` in the installed script to select your release repository:
    ```bash
    install -d -m 0755 /usr/local/sbin/nginx-update
    install -m 0755 deploy.sh /usr/local/sbin/nginx-update/deploy.sh

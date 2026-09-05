@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-readonly REPO="OWNER/REPO"              # edit this: your GitHub repo
+readonly REPO="OWNER/REPO"              # Set to the GitHub repository whose releases you use.
 readonly NGINX_PREFIX="/usr/local/nginx"
 readonly NGINX_USER="nginx"
 readonly LOG_FILE="/var/log/nginx-auto-update.log"
@@ -19,9 +19,19 @@ for arg in "$@"; do [[ "$arg" == "--allow-downgrade" ]] && ALLOW_DOWNGRADE=1; do
 readonly ALLOW_DOWNGRADE
 
 [[ $EUID -ne 0 ]] && { echo "root required"; exit 1; }
-for cmd in jq gpgv curl tar; do
-    command -v "$cmd" >/dev/null 2>&1 || { echo "required command missing: $cmd (apt install jq gpg gnupg2)"; exit 1; }
+[[ "$REPO" == "OWNER/REPO" ]] && { echo "set REPO in deploy.sh to your release repository (OWNER/REPO)" >&2; exit 1; }
+for cmd in jq gpgv curl tar flock ldd dpkg-query; do
+    command -v "$cmd" >/dev/null 2>&1 || { echo "required command missing: $cmd; run: apt-get update && apt-get install -y jq gpgv curl tar util-linux libc-bin dpkg" >&2; exit 1; }
 done
+
+missing_pkgs=()
+for pkg in $RUNTIME_PKGS; do
+    [[ $(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null) == "install ok installed" ]] || missing_pkgs+=("$pkg")
+done
+if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
+    echo "runtime dependencies missing: ${missing_pkgs[*]}; run: apt-get update && apt-get install -y ${missing_pkgs[*]}" >&2
+    exit 1
+fi
 
 exec 200>/var/lock/nginx-update.lock
 flock -n 200 || { echo "another instance is running"; exit 1; }
@@ -72,15 +82,6 @@ fi
 install -d -m 0755 /var/log/nginx /etc/nginx /run/lock
 mkdir -p /var/cache/nginx/{client_temp,proxy_temp,fastcgi_temp,uwsgi_temp,scgi_temp}
 chown -R "$NGINX_USER:$NGINX_USER" /var/cache/nginx
-
-missing_pkgs=()
-for pkg in $RUNTIME_PKGS; do
-    dpkg -s "$pkg" >/dev/null 2>&1 || missing_pkgs+=("$pkg")
-done
-if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
-    log INFO "installing runtime deps: ${missing_pkgs[*]}"
-    apt-get update -qq && apt-get install -y -qq "${missing_pkgs[@]}" >> "$LOG_FILE" || { log ERROR "dependency install failed"; exit 1; }
-fi
 
 # Resolve the installed version when the marker predates this script.
 current_tag=""

@@ -45,26 +45,32 @@ GitHub Actions (schedule + workflow_dispatch)
 
 ## 設定
 
+隨附的 `nginx-signer.asc` 是 `leoking670/nginx-custom-build` 的簽署公鑰。若使用自己的 fork,請替換為自己的公鑰,並將對應私鑰設定為 `NGINX_GPG_PRIVATE`。
+
 **一次性,GitHub 端:**
 
 1. 將此倉庫推為**公開**倉庫——公開 Release 可讓主機免 token 下載。
 2. 產生簽署用的 GPG 金鑰對:
    ```bash
    gpg --generate-key
-   gpg --export-secret-keys --armor > key.asc
-   gh secret set NGINX_GPG_PRIVATE < key.asc
-   gpg --export > nginx-signer.asc
+   gpg --armor --export-secret-keys KEY_FINGERPRINT | gh secret set NGINX_GPG_PRIVATE
+   gpg --armor --output nginx-signer.asc --export KEY_FINGERPRINT
    ```
    請使用專供 CI 簽署、且不設密碼的金鑰,不要上傳個人金鑰。工作流程以非互動方式簽署,不會處理密碼提示。
 3. 觸發建置(等待排程,或手動執行 workflow)。首次執行會發佈一個 tag 為 `nginx-<v>-openssl-<v>` 的 Release。
 
 **一次性,主機端(以 root):**
 
-1. 將公鑰匯入 keyring:
+需要使用 systemd 的 Debian 13 x86_64 主機。
+
+1. 一次性安裝相依套件,再匯入公鑰。部署時會檢查相依性並提示缺少的套件:
    ```bash
-   gpg --no-default-keyring --keyring /usr/share/keyrings/nginx-signer.gpg --import nginx-signer.asc
+   apt-get update
+   apt-get install -y ca-certificates curl jq gnupg gpgv tar util-linux libc-bin zlib1g libpcre2-8-0 libjemalloc2 cron
+   install -d -m 0755 /usr/share/keyrings
+   gpg --dearmor --output /usr/share/keyrings/nginx-signer.gpg nginx-signer.asc
    ```
-2. 將 `deploy.sh` 安裝到主機(必須可執行,見下方執行位說明),並在頂端設定 `REPO="OWNER/REPO"`:
+2. 安裝 `deploy.sh`,再編輯已安裝腳本中的 `REPO="OWNER/REPO"`,指定你的 Release 倉庫:
    ```bash
    install -d -m 0755 /usr/local/sbin/nginx-update
    install -m 0755 deploy.sh /usr/local/sbin/nginx-update/deploy.sh
