@@ -20,7 +20,7 @@ jobs:
       nginx: ${{ steps.up.outputs.nginx }}
       openssl: ${{ steps.up.outputs.openssl }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Detect latest versions
         id: up
         run: |
@@ -61,7 +61,7 @@ jobs:
       NGINX_VER: ${{ needs.check.outputs.nginx }}
       SSL_VER: ${{ needs.check.outputs.openssl }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build tools
         run: |
@@ -145,7 +145,7 @@ jobs:
             -C "$STAGE" sbin conf .versions
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           path: nginx-*.tar.gz
           name: nginx-run
@@ -159,8 +159,8 @@ jobs:
       NGINX_VER: ${{ needs.build.outputs.nginx }}
       SSL_VER: ${{ needs.build.outputs.openssl }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: nginx-run
 
