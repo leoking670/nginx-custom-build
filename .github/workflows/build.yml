@@ -77,8 +77,8 @@ jobs:
           mkdir -p "$WORK" && cd "$WORK"
           git clone --depth 1 https://github.com/facebook/zstd.git zstd
           cd zstd
-          make -j"$(nproc)" lib-release
-          make PREFIX=/usr/local install-lib install-includes
+          make -C lib -j"$(nproc)" libzstd.a-release
+          make -C lib PREFIX=/usr/local install-static install-includes
 
       - name: Download sources
         run: |
