@@ -29,8 +29,12 @@ latest_openssl() {
 }
 
 [ ! -f "$VERSIONS_FILE" ] && { echo "versions.json not found" >&2; exit 2; }
-published_nginx=$(jq -r '.nginx' "$VERSIONS_FILE")
-published_ssl=$(jq -r '.openssl' "$VERSIONS_FILE")
+published_nginx=$(jq -er '.nginx | select(type == "string")' "$VERSIONS_FILE") || { echo "could not read nginx version from versions.json" >&2; exit 2; }
+published_ssl=$(jq -er '.openssl | select(type == "string")' "$VERSIONS_FILE") || { echo "could not read OpenSSL version from versions.json" >&2; exit 2; }
+if [[ ! "$published_nginx" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$published_ssl" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "invalid version in versions.json (expected three numeric components)" >&2
+    exit 2
+fi
 
 latest_nginx_v=$(latest_nginx)
 latest_ssl_v=$(latest_openssl)

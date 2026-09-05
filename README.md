@@ -80,6 +80,8 @@ Host (cron, runs deploy.sh)
 - On a fresh install the script writes only a minimal placeholder `nginx.conf`. It does **not** overwrite an existing configuration.
 - Release tag is the single source of truth for the installed version; `versions.json` is only for CI's "do we need to build?" decision.
 - A failed `gpgv` verification, a missing dependency (`ldd`), or a failed `nginx -t` trips the circuit breaker — the running Nginx is left untouched.
+- A failed smooth upgrade attempts to restore the previous binary and restart the service, then trips the circuit breaker. Resolve the failure before removing `/var/lib/nginx-update-breaker` and retrying.
+- Existing installations without `.current_version` require a valid configuration and an active service. Interrupted installs need manual recovery; marked installations already stopped remain stopped.
 
 ## License
 

@@ -87,6 +87,9 @@ current_tag=""
 if [[ -f "$MARKER" ]]; then
     current_tag=$(cat "$MARKER")
 elif [[ -x "$NGINX_PREFIX/sbin/nginx" ]]; then
+    if ! "$NGINX_PREFIX/sbin/nginx" -t >/dev/null 2>&1 || ! systemctl is-active --quiet nginx; then
+        fatal "installation has no version marker and is not confirmed healthy; check $NGINX_PREFIX/sbin/nginx -t and systemctl status nginx, restore the service manually, then retry"
+    fi
     info=$("$NGINX_PREFIX/sbin/nginx" -V 2>&1 || true)
     n_ver=$(echo "$info" | grep -oP 'nginx/\K[0-9.]+' 2>/dev/null || echo "")
     s_ver=$(echo "$info" | grep -oP 'OpenSSL \K[0-9.]+' 2>/dev/null || echo "")
@@ -106,6 +109,7 @@ latest_tag=$(fetch_latest)
 log INFO "current: ${current_tag:-not installed} | latest: $latest_tag"
 
 if [[ "$current_tag" == "$latest_tag" ]]; then
+    [[ -f "$MARKER" ]] || echo "$latest_tag" > "$MARKER"
     log INFO "already up to date, nothing to do"
     exit 0
 fi
@@ -117,8 +121,8 @@ if [[ -n "$current_tag" ]]; then
     cur_nginx=$(echo "$current_tag" | sed -n 's/^nginx-\([0-9.]*\)-openssl.*/\1/p')
     cur_ssl=$(echo "$current_tag" | sed -n 's/.*-openssl-\([0-9.]*\)$/\1/p')
     downgrade_nginx=0; downgrade_ssl=0
-    [[ -n "$cur_nginx" && -n "$latest_nginx" ]] && printf '%s\n%s\n' "$latest_nginx" "$cur_nginx" | sort -V -C && downgrade_nginx=1 || true
-    [[ -n "$cur_ssl" && -n "$latest_ssl" ]] && printf '%s\n%s\n' "$latest_ssl" "$cur_ssl" | sort -V -C && downgrade_ssl=1 || true
+    [[ -n "$cur_nginx" && -n "$latest_nginx" && "$cur_nginx" != "$latest_nginx" ]] && printf '%s\n%s\n' "$latest_nginx" "$cur_nginx" | sort -V -C && downgrade_nginx=1 || true
+    [[ -n "$cur_ssl" && -n "$latest_ssl" && "$cur_ssl" != "$latest_ssl" ]] && printf '%s\n%s\n' "$latest_ssl" "$cur_ssl" | sort -V -C && downgrade_ssl=1 || true
     if [[ $downgrade_nginx -eq 1 || $downgrade_ssl -eq 1 ]]; then
         if [[ $ALLOW_DOWNGRADE -eq 1 ]]; then
             log WARN "downgrade detected (nginx $cur_nginx->$latest_nginx ssl $cur_ssl->$latest_ssl) but --allow-downgrade given; proceeding"
@@ -252,41 +256,54 @@ else
     fi
 
     if [[ $nginx_was_running -eq 1 ]]; then
+        old_pid=$(cat /run/nginx.pid 2>/dev/null || true)
+        if [[ ! "$old_pid" =~ ^[1-9][0-9]*$ || "$old_pid" == "1" ]] || ! kill -0 "$old_pid" 2>/dev/null; then
+            fatal "missing or invalid live master PID in /run/nginx.pid; check systemctl status nginx"
+        fi
+        [[ ! -e /run/nginx.pid.oldbin ]] || fatal "previous upgrade has an .oldbin PID file; inspect nginx processes before retrying"
+
         # USR2 re-executes the binary at its installed path.
         mv -f "$standby" "$NGINX_PREFIX/sbin/nginx"
         smooth_upgrade=0
-        if [[ -f /run/nginx.pid ]]; then
-            old_pid=$(cat /run/nginx.pid)
-            kill -USR2 "$old_pid" 2>/dev/null && {
-                for i in $(seq 1 20); do [[ -f /run/nginx.pid.oldbin ]] && break || sleep 0.5; done
+        new_pid=""
+        if kill -USR2 "$old_pid" 2>/dev/null; then
+            for i in $(seq 1 20); do
                 if [[ -f /run/nginx.pid.oldbin && -f /run/nginx.pid ]]; then
-                    new_pid=$(cat /run/nginx.pid 2>/dev/null || echo "")
-                    [[ -n "$new_pid" ]] && kill -0 "$new_pid" 2>/dev/null && sleep 3 && kill -0 "$new_pid" 2>/dev/null && {
-                        kill -QUIT "$old_pid" 2>/dev/null || true
-                        log INFO "smooth upgrade successful"
-                        smooth_upgrade=1
-                    }
+                    new_pid=$(cat /run/nginx.pid 2>/dev/null || true)
+                    if [[ "$new_pid" =~ ^[1-9][0-9]*$ && "$new_pid" != "1" && "$new_pid" != "$old_pid" ]] && kill -0 "$new_pid" 2>/dev/null; then
+                        sleep 3
+                        if kill -0 "$new_pid" 2>/dev/null && kill -QUIT "$old_pid" 2>/dev/null; then
+                            smooth_upgrade=1
+                        fi
+                        break
+                    fi
                 fi
-            } || true
+                sleep 0.5
+            done
+        fi
+        if [[ $smooth_upgrade -eq 1 ]]; then
+            sleep 2
+            if ! systemctl is-active --quiet nginx; then
+                smooth_upgrade=0
+            fi
         fi
         if [[ $smooth_upgrade -eq 0 ]]; then
             log WARN "smooth upgrade did not confirm; restoring pre-upgrade binary"
-            cp -a "$rollback_backup" "$NGINX_PREFIX/sbin/nginx"
-            for pid in "${new_pid:-}" "$old_pid"; do
-                [[ "$pid" =~ ^[0-9]+$ ]] && kill -QUIT "$pid" 2>/dev/null || true
-            done
-            sleep 1
-            rm -f /run/nginx.pid.oldbin 2>/dev/null || true
-            systemctl restart nginx 2>/dev/null || true
+            # Rename a separate inode over the executable, which may still be running.
+            if ! cp -a "$rollback_backup" "$standby" || ! mv -f "$standby" "$NGINX_PREFIX/sbin/nginx"; then
+                fatal "could not restore pre-upgrade binary; existing processes left running"
+            fi
+            if ! systemctl restart nginx; then
+                fatal "could not restart nginx after restoring pre-upgrade binary"
+            fi
             sleep 2
             if ! systemctl is-active --quiet nginx; then
-                log ERROR "pre-upgrade master could not be restarted"
-                fatal "Cannot restore service after failed upgrade"
+                fatal "service unhealthy after restoring pre-upgrade binary"
             fi
             log INFO "pre-upgrade master restored via restart"
             fatal "upgrade failed; restored pre-upgrade master (see log)"
         fi
-        sleep 2; systemctl is-active --quiet nginx || fatal "service unhealthy after upgrade"
+        log INFO "smooth upgrade successful"
     else
         log INFO "nginx not running, swapping binary without starting"
         mv -f "$standby" "$NGINX_PREFIX/sbin/nginx"

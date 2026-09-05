@@ -80,6 +80,8 @@ GitHub Actions (schedule + workflow_dispatch)
 - `nginx.conf` 若為全新安裝時腳本只寫最小佔位設定。**不**覆寫既有設定。
 - Release tag 是已安裝版本的唯一真源;`versions.json` 僅供 CI 決定「是否需要建置」。
 - `gpgv` 驗證失敗、相依性缺失(`ldd`)、或 `nginx -t` 失敗會觸發熔斷——正在執行的 Nginx 保持不受影響。
+- 平滑升級失敗會嘗試恢復舊二進位檔並重新啟動服務,然後觸發熔斷。排除故障後,刪除 `/var/lib/nginx-update-breaker` 再重試。
+- 已有安裝若缺少 `.current_version`,需確認設定有效且服務正在執行。安裝中斷需人工恢復;已有標記且已停服的安裝維持停服。
 
 ## 授權
 
