@@ -1,5 +1,5 @@
 {
   "_comment": "The last successfully published version. The check script compares upstream latest against this before building; it is advanced only after a release succeeds. The host does not read this file.",
-  "nginx": "1.30.4",
+  "nginx": "1.30.5",
   "openssl": "3.5.8"
 }
